@@ -149,10 +149,11 @@ func main() {
 		copyErrCh <- e
 	}()
 
-	// stdin -> PTY; on Enter (CR or LF), write prompt to logs immediately.
+	// stdin -> PTY; log complete prompts on Enter, handle paste mode and editing.
 	go func() {
 		reader := bufio.NewReader(os.Stdin)
 		var buf bytes.Buffer
+		inPasteMode := false
 
 		for {
 			r, _, rerr := reader.ReadRune()
@@ -166,29 +167,89 @@ func main() {
 				return
 			}
 
-			// End-of-prompt on CR or LF (macOS sends '\r' in raw mode).
-			if r == '\r' || r == '\n' {
-				msg := strings.TrimSpace(buf.String())
-				if msg != "" {
-					// Plain text
-					if promptsTxt != nil {
-						fmt.Fprintln(promptsTxt, msg)
-						_ = promptsTxt.Sync()
+			// Handle escape sequences
+			if r == '\x1b' { // ESC character
+				// Read the full escape sequence
+				var escSeq strings.Builder
+				escSeq.WriteRune(r)
+
+				for {
+					next, _, err := reader.ReadRune()
+					if err != nil {
+						break
 					}
-					// JSONL
-					if promptsJSONL != nil {
-						rec := map[string]string{"role": "user", "content": msg}
-						b, _ := json.Marshal(rec)
-						fmt.Fprintln(promptsJSONL, string(b))
-						_ = promptsJSONL.Sync()
+					if _, werr := ptmx.WriteString(string(next)); werr != nil {
+						copyErrCh <- werr
+						return
+					}
+					escSeq.WriteRune(next)
+
+					// Check for bracketed paste mode
+					seq := escSeq.String()
+					if strings.Contains(seq, "[200~") {
+						inPasteMode = true
+						break
+					} else if strings.Contains(seq, "[201~") {
+						inPasteMode = false
+						break
+					}
+
+					// End of escape sequence (letter or ~)
+					if (next >= 'A' && next <= 'Z') || (next >= 'a' && next <= 'z') || next == '~' {
+						break
 					}
 				}
-				buf.Reset()
+				continue // Don't add escape sequences to buffer
+			}
+
+			// Handle backspace/delete - remove from buffer
+			if r == '\x08' || r == '\x7f' { // BS or DEL
+				if buf.Len() > 0 {
+					content := buf.String()
+					if len(content) > 0 {
+						// Remove last rune (handle UTF-8 properly)
+						runes := []rune(content)
+						if len(runes) > 0 {
+							buf.Reset()
+							buf.WriteString(string(runes[:len(runes)-1]))
+						}
+					}
+				}
 				continue
 			}
 
-			// Accumulate the current line.
-			buf.WriteRune(r)
+			// Skip other control characters except CR/LF/TAB
+			if r < 32 && r != '\r' && r != '\n' && r != '\t' {
+				continue
+			}
+
+			// Handle newlines - only log on Enter when not in paste mode
+			if r == '\r' || r == '\n' {
+				if !inPasteMode {
+					msg := strings.TrimSpace(buf.String())
+					if msg != "" {
+						// Plain text
+						if promptsTxt != nil {
+							fmt.Fprintln(promptsTxt, msg)
+							_ = promptsTxt.Sync()
+						}
+						// JSONL
+						if promptsJSONL != nil {
+							rec := map[string]string{"role": "user", "content": msg}
+							b, _ := json.Marshal(rec)
+							fmt.Fprintln(promptsJSONL, string(b))
+							_ = promptsJSONL.Sync()
+						}
+					}
+					buf.Reset()
+				} else {
+					// In paste mode, preserve newlines
+					buf.WriteRune('\n')
+				}
+			} else {
+				// Add printable characters to buffer
+				buf.WriteRune(r)
+			}
 		}
 	}()
 
