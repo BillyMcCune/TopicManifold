@@ -1,0 +1,21 @@
+# Captured terminal interactions (may contain sensitive prompt content)
+.ai-cli-log/
+
+# Generated analysis artifacts
+topic_output/
+demo_run/
+large_demo_run/
+
+# Local build outputs
+bin/
+topicmanifold
+
+# Python environments, caches, and packaging artifacts
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# OS metadata
+.DS_Store

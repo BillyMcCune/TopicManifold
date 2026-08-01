@@ -20,6 +20,18 @@ import (
 	"golang.org/x/term"
 )
 
+// promptRecord is deliberately self-contained: a JSONL file can be moved or
+// merged without losing the context in which a prompt was captured.
+type promptRecord struct {
+	SchemaVersion int       `json:"schema_version"`
+	Timestamp     time.Time `json:"timestamp"`
+	SessionID     string    `json:"session_id"`
+	Role          string    `json:"role"`
+	Content       string    `json:"content"`
+	Command       []string  `json:"command"`
+	WorkingDir    string    `json:"working_dir,omitempty"`
+}
+
 func main() {
 	var (
 		logDir     string
@@ -94,6 +106,7 @@ func main() {
 	// Prepare prompt-only logs.
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		fmt.Fprintf(os.Stderr, "log dir error: %v\n", err)
+		os.Exit(1)
 	}
 	start := time.Now()
 	base := start.Format("20060102-150405")
@@ -105,6 +118,8 @@ func main() {
 	promptsTxt, err := os.Create(promptsTxtPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "prompts txt log error: %v\n", err)
+		_ = ptmx.Close()
+		os.Exit(1)
 	}
 	defer func() {
 		if promptsTxt != nil {
@@ -116,6 +131,9 @@ func main() {
 	promptsJSONL, err := os.Create(promptsJSONLPath)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "prompts jsonl log error: %v\n", err)
+		_ = promptsTxt.Close()
+		_ = ptmx.Close()
+		os.Exit(1)
 	}
 	defer func() {
 		if promptsJSONL != nil {
@@ -123,6 +141,25 @@ func main() {
 			_ = promptsJSONL.Close()
 		}
 	}()
+
+	workingDir, _ := os.Getwd()
+	writePrompt := func(msg string) {
+		fmt.Fprintln(promptsTxt, msg)
+		_ = promptsTxt.Sync()
+		rec := promptRecord{
+			SchemaVersion: 1,
+			Timestamp:     time.Now().UTC(),
+			SessionID:     prefix,
+			Role:          "user",
+			Content:       msg,
+			Command:       argv,
+			WorkingDir:    workingDir,
+		}
+		if b, marshalErr := json.Marshal(rec); marshalErr == nil {
+			fmt.Fprintln(promptsJSONL, string(b))
+			_ = promptsJSONL.Sync()
+		}
+	}
 
 	// Graceful shutdown on Ctrl-C: close logs & PTY so buffers flush.
 	intc := make(chan os.Signal, 1)
@@ -228,18 +265,7 @@ func main() {
 				if !inPasteMode {
 					msg := strings.TrimSpace(buf.String())
 					if msg != "" {
-						// Plain text
-						if promptsTxt != nil {
-							fmt.Fprintln(promptsTxt, msg)
-							_ = promptsTxt.Sync()
-						}
-						// JSONL
-						if promptsJSONL != nil {
-							rec := map[string]string{"role": "user", "content": msg}
-							b, _ := json.Marshal(rec)
-							fmt.Fprintln(promptsJSONL, string(b))
-							_ = promptsJSONL.Sync()
-						}
+						writePrompt(msg)
 					}
 					buf.Reset()
 				} else {
